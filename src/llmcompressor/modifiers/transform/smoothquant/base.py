@@ -2,8 +2,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
-from compressed_tensors.offload import update_offload_parameter
-from compressed_tensors.utils import match_modules_set, match_named_modules
+from compressed_tensors.utils import (
+    align_module_device,
+    match_modules_set,
+    match_named_modules,
+)
 from loguru import logger
 from pydantic import ConfigDict, Field
 from torch.nn import Module
@@ -209,11 +212,8 @@ class SmoothQuantModifier(Modifier):
             )
 
         for mapping in self.mappings:
-            # we deliberately don't use the ignore list when matching mappings
-            # so that we can handle layers that need smoothing but not all operations
-            # we only skip if no layers in mapping would be smoothed.
             for *nested_balance_layers, smooth_layers in match_modules_set(
-                model, tree_leaves(mapping)
+                model, tree_leaves(mapping), ignore=self.ignore
             ):
                 if len(smooth_layers) > 1:
                     raise ValueError(
@@ -320,22 +320,16 @@ class SmoothQuantModifier(Modifier):
 
             @torch.no_grad()
             def smooth(module):
-                if module in balance_layers:
-                    update_offload_parameter(
-                        module, "weight", module.weight * scales.view(1, -1)
-                    )
-                elif module == smooth_layer:
-                    if module.weight.ndim == 1:
-                        update_offload_parameter(
-                            module, "weight", module.weight / scales
-                        )
-                    else:
-                        update_offload_parameter(
-                            module, "weight", module.weight / scales.view(-1, 1)
-                        )
-
-                    if hasattr(module, "bias") and module.bias is not None:
-                        update_offload_parameter(module, "bias", module.bias / scales)
+                with align_module_device(module):
+                    if module in balance_layers:
+                        module.weight.mul_(scales.view(1, -1))
+                    elif module == smooth_layer:
+                        if module.weight.ndim == 1:
+                            module.weight.div_(scales)
+                        else:
+                            module.weight.div_(scales.view(-1, 1))
+                        if hasattr(module, "bias") and module.bias is not None:
+                            module.bias.div_(scales)
 
             for layer in balance_layers:
                 smooth(layer)
@@ -358,8 +352,9 @@ class SmoothQuantModifier(Modifier):
         # get the channel-wise dynamic range for each layer to be balanced
         weight_scales = []
         for layer in balance_layers:
-            scale = layer.weight.abs().max(dim=0, keepdim=True)[0]
-            weight_scales.append(scale)
+            with align_module_device(layer):
+                scale = layer.weight.abs().max(dim=0, keepdim=True)[0]
+                weight_scales.append(scale)
 
         weight_scales = 2.0 * torch.cat(weight_scales, dim=0).max(dim=0)[0]
 

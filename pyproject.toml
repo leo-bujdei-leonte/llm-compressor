@@ -1,3 +1,10 @@
+[project]
+name = "llm-compressor"
+version = "0.10.0.1"
+authors = [{name = "Leo Bujdei-Leonte", email = "leo@poly-ai.com"}]
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+
 [build-system]
 requires = ["setuptools", "wheel", "setuptools_scm==8.2.0"]
 build-backend = "setuptools.build_meta"
